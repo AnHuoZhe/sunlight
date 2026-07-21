@@ -148,7 +148,8 @@ state.db (SQLite)
                 "overhead_tokens": 12000,    # 技能加载+工具调用+系统提示词
                 "tool_cost": 0.002,          # 工具调用消耗的估算成本
                 "is_parallel": True,
-                "waste_tokens": 0            # 失败重试浪费的token
+                "waste_tokens": 0,           # 失败重试浪费的token
+                "efficiency": "low"          # 效率评级: high/medium/low/high_with_savings
             }
         ],
         "hotspots": [                        # 成本热点
@@ -180,8 +181,9 @@ state.db (SQLite)
 - 浪费token：finish_reason!="stop"的消息 + 同一工具连续2次以上调用的重复token
 - 并行节省估算：并行轮次的总token × 0.3（并行相比串行节省约30%的静态前缀重复）
 - 开销占比：开销token / 总token
+- 效率评级：high（开销占比<30%或并行节省显著）/ medium（正常范围）/ low（开销占比>70%或存在浪费token）/ high_with_savings（存在显著节省决策，如patch替代write_file）
 
-成本数据随parser输出流入narrator，narrator的LLM基于这些确定性的数字生成分析叙述。LLM不计算数字——数字是parser算好的。
+成本数据随parser输出流入narrator。narrator在第一块全流程中只对效率评级为low或high_with_savings的步骤嵌入成本标注；在第三块成本透视中展示全部数据。
 
 ---
 
@@ -630,12 +632,25 @@ state.db的messages表和sessions表在Hermes写入时已经记录了完整的to
 
 所以成本透视分两层：数字由parser算（零LLM成本），解读由narrator写（计入narrator的LLM调用，不额外增加调用次数）。
 
-### 11.4 成本透视在报告中的位置
+### 11.4 成本数据在报告中的呈现策略
 
-位于"六角度综合分析"之后、"核心发现与改进方向"之前。逻辑顺序：
+**双层呈现：全流程嵌入 + 全局视角。**
 
+**第一块（全流程展示）——只标异常：**
+
+成本数据不跟着每个步骤走。只在两种情况下嵌入：
+
+- 成本热点：某步token消耗显著高于平均值（>2倍均值）。标注"本步消耗X tokens，是全对话第N贵的步骤，原因：..."
+- 成本节省：某决策显著降低了成本（如选patch而非write_file）。标注"本决策节省约X tokens，对比方案Y"
+
+正常消耗不出现。避免每步都塞数字打断叙事流。判定标准：parser输出的by_turn数据中，标记efficiency为"low"（热点）或"high_with_savings"（节省点）的轮次才嵌入。
+
+**第三块（成本透视）——全局视角：**
+
+保留完整数据——per-turn成本表、所有步骤的token消耗、开销分解、趋势分析。读者想深入了解时翻到这一章即可。
+
+**逻辑：**
 ```
-结构分析（六角度）→ 成本分析（每步烧了多少）→ 综合发现（结构问题+成本问题的交叉）
+全流程(定性+异常定量) → 六角度(结构分析) → 成本透视(完整定量) → 核心发现(交叉)
 ```
-
-成本数据为结构分析提供量化支撑——"这个约束生效了"是定性，"生效的同时多花了$0.005"是定量。两者合在一起才能判断一个设计决策的完整ROI。
+读者第一遍看流程时不被数字淹没，发现异常时知道"这里贵了/省了"，想深究时翻到第三块看完整数据。
