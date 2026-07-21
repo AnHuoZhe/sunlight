@@ -1,58 +1,47 @@
-# 晒阳 (Sunlight)
+# Sunlight
 
-Agent ReAct 循环透明化分析工具。读取 Hermes 对话 session，按六角度拆解 ReAct 循环，生成 Word 分析报告。
+> 把 Agent 的 ReAct 循环晒在太阳底下——读对话记录，拆成九步流程，标注每一步对应什么，生成本地 Word 报告。
 
-## 一句话
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
 
-让 Agent 的黑箱在阳光下晒一晒——从用户输入到模型输出的每一步，标注在李博杰《深入理解 AI Agent》书中的对应概念，再从六个角度做系统性分析。
+## Why This Exists
 
-## 六角度分析框架
+Agent 的 ReAct 循环是个黑盒——你看得见输入输出，看不见中间的意图解析、任务拆解、工具选择。出了问题不知道哪步判断错了。
 
-`Agent = LLM + [上下文 + 工具 + 约束 + 验证 + 纠正]`
+Sunlight 把一次完整的 Agent 对话摊开：用户输入 → 静态前缀 → 意图解析 → 任务拆解 → 工具选择 → 轨迹累积 → 约束检查 → 生成回答 → 验证纠正。每一步标注对应什么，生成 Word 报告。
 
-- **LLM**：什么时候调用了 LLM、内部思考了什么、做了什么决策、什么时候走了规则
-- **上下文**：静态前缀（系统提示词+技能+记忆）和轨迹（对话历史）分别注入了什么
-- **工具**：调了什么工具、为什么选它、结果怎么用、失败怎么处理
-- **约束**：什么规则在限制 Agent 的行为、每条约束是否生效
-- **验证**：Agent 怎么检查自己做得对不对
-- **纠正**：错了怎么补救、用户纠正后怎么调整
-
-## 报告结构
-
-两段式：
-
-1. **全流程展示**：从用户输入→加载静态前缀→意图解析→任务拆解→工具选择与执行→轨迹累积→约束检查→生成回答→验证与纠正，每步标注对应李博杰《深入理解 AI Agent》的章节
-2. **六角度分析**：按上述六个角度逐一分析本次对话的 ReAct 循环特征
-
-## 快速开始
+## Quick Start
 
 ```bash
-# 1. 安装依赖
-pip install python-dotenv python-docx
-
-# 2. 配置
-cp .env.example .env
-# 编辑 .env，填入 DeepSeek API Key 和 state.db 路径
-
-# 3. 运行
-python main.py              # 分析最近一次 session
-python main.py <session_id>  # 分析指定 session
+git clone https://github.com/AnHuoZhe/sunlight.git
+cd sunlight
+pip install pyyaml python-docx
 ```
 
-## 配置
+```python
+# 读 Hermes 对话数据库，生成分析报告
+python main.py
+```
 
-| 环境变量 | 说明 | 默认值 |
-|----------|------|--------|
-| `STATE_DB_PATH` | Hermes state.db 路径 | 无，必填 |
-| `DEEPSEEK_API_KEY` | DeepSeek API 密钥 | 无，必填 |
-| `OUTPUT_DIR` | 报告输出目录 | `./output` |
+输出：Word 报告保存在 `samples/` 目录。
 
-## 设计
+## 为什么不是 Agent 而是工作流
 
-纯工作流工具，非自主 Agent。五段式管道：读→解析→分类→叙述→输出。LLM 仅在语义分类和叙述生成两处介入（最多 2 次调用），失败有降级策略和中间结果缓存。
+Sunlight 是纯工作流——5 段管道（读→解析→分类→叙述→输出），2 次 LLM 调用，不自主执行任何操作。它分析 Agent 但不做 Agent。
 
-详见 [architecture.md](architecture.md)。
+设计原因：Agent 分析自己的推理时不是在"回忆"（LLM 没有记忆），而是在"构造"听起来合理的推理链条。这种自我美化是结构性的——Agent 无法自主发现自己在美化。Sunlight 站在外部看，不受这个偏差影响。
 
-## 许可证
+## 五段管道
 
-MIT
+| 阶段 | 功能 |
+|------|------|
+| Reader | 读 Hermes state.db 对话记录 |
+| Parser | 解析消息流转和工具调用 |
+| Classifier | 六角度分类（LLM/上下文/工具/约束/验证/纠正） |
+| Narrator | 生成自然语言叙述 |
+| Writer | 输出 Word 报告 |
+
+## License
+
+MIT © [AnHuoZhe](https://github.com/AnHuoZhe)
