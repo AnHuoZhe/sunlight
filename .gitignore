@@ -11,6 +11,7 @@ venv/
 # 输出
 output/
 *.docx
+!samples/*.docx
 
 # 中间缓存
 .cache/
