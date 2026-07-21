@@ -179,7 +179,7 @@ state.db (SQLite)
 - 开销token：per-turn total - 有效token
 - 工具成本：tool角色的messages的token_count之和
 - 浪费token：finish_reason!="stop"的消息 + 同一工具连续2次以上调用的重复token
-- 并行节省估算：并行轮次的总token × 0.3（并行相比串行节省约30%的静态前缀重复）
+- 并行节省估算：并行轮次的总token × 0.3（非实测——对话未以串行方式发生过，基于静态前缀去重的推理估算）
 - 开销占比：开销token / 总token
 - 效率评级：high（开销占比<30%或并行节省显著）/ medium（正常范围）/ low（开销占比>70%或存在浪费token）/ high_with_savings（存在显著节省决策，如patch替代write_file）
 
@@ -611,16 +611,23 @@ state.db的messages表和sessions表在Hermes写入时已经记录了完整的to
 
 晒阳不需要在Agent运行时插桩——成本数据是Hermes已经记录的副作用。reader读到什么，parser就算什么。
 
-### 11.2 成本指标的定义
+### 11.2 成本指标的定义与数据来源
 
-| 指标 | 计算方式 | 工程意义 |
-|------|----------|----------|
-| 有效token | 用户消息+Agent回答正文的token | 真正产生价值的token |
-| 开销token | 技能加载+系统提示词+工具调用的token | 为完成任务付出的固定成本 |
-| 开销占比 | 开销token/总token | 越高说明Agent越"重"——大部分token花在准备工作上 |
-| 浪费token | 失败重试+异常截断的token | 零价值的消耗，越低越好 |
-| 并行节省 | 并行轮次总token × 0.3 | 并行避免重复注入静态前缀的估算节省 |
-| 单轮成本 | DeepSeek定价 × token数 | 最直观的效率指标 |
+| 指标 | 计算方式 | 数据来源 | 精确度 |
+|------|----------|----------|--------|
+| 总输入token | 直接读取 | sessions.input_tokens（DeepSeek API返回值） | 精确 |
+| 总输出token | 直接读取 | sessions.output_tokens（DeepSeek API返回值） | 精确 |
+| 单条消息token | 直接读取 | messages.token_count（Hermes写入的API返回值） | 精确 |
+| 成本(USD) | 直接读取 | sessions.estimated_cost_usd（DeepSeek API返回值） | 精确 |
+| 有效token | messages.token_count累加筛选 | 数据读取+规则分类 | 精确 |
+| 开销token | 总token - 有效token | 精确数据减法 | 精确 |
+| 开销占比 | 开销token/总token | 精确数据除法 | 精确 |
+| 浪费token | finish_reason!="stop"的消息token之和 | 精确数据+规则筛选 | 近似（无法区分"必要的重试"和"浪费的重试"） |
+| 并行节省估算 | 并行轮次总token × 0.3 | 推理计算，非实测 | 估算（对话未以串行方式实际发生过） |
+
+**关键区分：前三类（总token/单条token/成本）是DeepSeek API每次调用后返回的真实数据，Hermes记录到state.db中。晒阳直接读取，不计算、不估算、不推测。**
+
+后两类（浪费/节省）是基于真实数据做的工程判断——数据本身是真的，但"这是不是浪费""省了多少"需要推理。架构文档中用"估算"一词仅指并行节省（因无法实测），浪费token用"近似"——数据精确但分类有主观性。
 
 ### 11.3 成本分析不能完全自动化
 
