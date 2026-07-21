@@ -1,9 +1,9 @@
 # 晒阳 — 架构设计文档
 
-> 版本：V2 | 2026-07-21
+> 版本：V3 | 2026-07-21
 > 类型：纯工作流型工具，非自主Agent
-> 定位：输入Hermes对话session → 按六角度拆解ReAct循环 → 输出Word分析报告
-> 变更：V2修复架构审查的3项必须改+6项建议改
+> 定位：输入Hermes对话session → 按六角度拆解ReAct循环 + 成本透视 → 输出Word分析报告
+> 变更：V3新增成本透视——步骤级token消耗、效率指标、成本收益分析
 
 ---
 
@@ -12,6 +12,8 @@
 晒阳是一个确定性工作流工具。用户说"react循环分析"，它读Hermes的state.db，解析指定session的对话，按`Agent = LLM + [上下文 + 工具 + 约束 + 验证 + 纠正]`六角度拆解每轮ReAct行为，生成Word分析报告。
 
 核心原则：能确定就确定，能不用Agent就不用Agent。LLM仅在语义分类和叙述生成两处介入。所有确定性步骤中间结果落盘，支持断点续跑。
+
+**双轨分析**：结构透明（六角度——每一步是什么、为什么、怎么验证纠正）+ 成本透明（token消耗——每一步烧了多少、效率如何、哪步最贵）。数据来源：state.db的messages表和sessions表已有完整的token统计字段，无需额外埋点。成本数据走确定性计算（parser层），不额外消耗LLM调用。
 
 ---
 
@@ -137,6 +139,28 @@ state.db (SQLite)
     ],
     "total_turns": 9,
     "total_tool_calls": 15,
+    "cost_breakdown": {
+        "session_total": {"input_tokens": 45000, "output_tokens": 12000, "estimated_cost_usd": 0.08},
+        "by_turn": [
+            {
+                "turn": 1,
+                "effective_tokens": 800,     # 用户输入+Agent回答正文
+                "overhead_tokens": 12000,    # 技能加载+工具调用+系统提示词
+                "tool_cost": 0.002,          # 工具调用消耗的估算成本
+                "is_parallel": True,
+                "waste_tokens": 0            # 失败重试浪费的token
+            }
+        ],
+        "hotspots": [                        # 成本热点
+            {"turn": 2, "cost": 0.025, "reason": "PDF提取+5次串行工具调用"},
+            {"turn": 3, "cost": 0.015, "reason": "delegate_task子agent审查"}
+        ],
+        "efficiency": {
+            "parallel_savings_estimate": 0.005,  # 并行调用节省的估算成本
+            "waste_from_retries": 0.003,          # 失败重试浪费的成本
+            "overhead_ratio": 0.76                 # 开销token占比(76%=技能+工具/总token)
+        }
+    },
     "estimated_total_tokens": 42000
 }
 ```
@@ -147,6 +171,17 @@ state.db (SQLite)
 - 并行判断：同一assistant消息中相邻tool_call的timestamp间隔<1秒
 - 用户纠正检测：user消息匹配关键词（"不对""再看看""8,9,10我回答了"）→标记has_user_correction
 - 从session_meta.estimated_cost_usd和message token_count估算总token
+
+**成本数据计算（确定性，不调LLM）**：
+- 逐轮汇总：累加该轮所有messages的token_count → per-turn total
+- 有效token：用户消息token_count + assistant回复正文token_count（排除tool_calls部分）
+- 开销token：per-turn total - 有效token
+- 工具成本：tool角色的messages的token_count之和
+- 浪费token：finish_reason!="stop"的消息 + 同一工具连续2次以上调用的重复token
+- 并行节省估算：并行轮次的总token × 0.3（并行相比串行节省约30%的静态前缀重复）
+- 开销占比：开销token / 总token
+
+成本数据随parser输出流入narrator，narrator的LLM基于这些确定性的数字生成分析叙述。LLM不计算数字——数字是parser算好的。
 
 ---
 
@@ -273,7 +308,36 @@ Prompt结构：
     "改进方向1: 事前声明——每轮工具调用前声明目的(层次一)",
     "改进方向2: 决策日志——复杂任务末尾附决策轨迹(层次三)",
     "改进方向3: 六角度标注——在决策日志中标注每步行为归属哪个角度"
-  ]
+  ],
+  "cost_analysis": {
+    "overview": "本次对话共消耗57,000 tokens（输入45K+输出12K），估算成本$0.08。开销token占比76%，工具调用是主要成本来源。",
+    "per_turn_table": [
+      {"turn": 1, "tokens": 12800, "cost": 0.012, "main_driver": "3次技能加载(并行)", "efficiency": "high"},
+      {"turn": 2, "tokens": 18500, "cost": 0.025, "main_driver": "5次串行工具调用+pymupdf安装", "efficiency": "low"}
+    ],
+    "hotspots": [
+      "第2轮是最贵的单轮($0.025)，占全对话31%。原因是pymupdf安装+5次串行工具调用无法并行化。",
+      "第3轮子agent审查($0.015)是额外成本，但发现了9个问题，避免了后续更大返工。ROI为正。"
+    ],
+    "efficiency_analysis": {
+      "parallel_turns": [1, 8],
+      "serial_turns": [2, 3, 4, 5, 6, 7, 9, 10],
+      "waste_events": [
+        {"turn": 2, "event": "pymupdf venv未安装→切换Python重试", "wasted_tokens": 2000, "wasted_cost": 0.002}
+      ],
+      "overhead_breakdown": {
+        "system_prompt": 3000,
+        "skills_loading": 15000,
+        "tool_calls": 12000,
+        "reasoning": 3000
+      }
+    },
+    "findings": [
+      "技能加载占总token的26%，其中thinking-foundation+learning-profile每轮都重复注入。如果KV Cache机制正常运转，这些应该被缓存而非每次重算。",
+      "工具调用串行化是成本放大器——第2轮的5次串行调用使该轮成本飙升。并行化可节省约30%。",
+      "delegate_task的成本($0.015)在本次对话中的ROI为正——发现的9个问题避免了后续架构返工。但审查成本是固定的，对小修改ROI可能为负。"
+    ]
+  }
 }
 ```
 
@@ -281,9 +345,21 @@ Prompt结构：
 
 Prompt包含：
 1. 严格的JSON输出格式要求——`只输出JSON，不要解释，不要markdown代码块包裹`
-2. 完整输出schema（如上）
-3. 1个完整示例（取自样本报告E:\work\word\study\react分析报告\React循环透明化分析报告.docx的结构）
-4. 当前session的分类结果+原始数据注入
+2. 完整输出schema（含cost_analysis字段）
+3. 1个完整示例（取自样本报告）
+4. 当前session的分类结果+原始数据+成本数据注入
+
+**成本分析的LLM指令**（narrator prompt中追加）：
+```
+基于提供的per-turn token数据，生成成本分析：
+1. overview：一句话总结总消耗
+2. per_turn_table：每轮的成本、主要驱动因素、效率评级(high/medium/low)
+3. hotspots：最贵的2-3轮，解释为什么贵
+4. efficiency_analysis：并行vs串行对比、浪费事件、开销分解
+5. findings：3个成本优化建议，基于数据而非猜测
+
+注意：成本数据来自state.db的messages.token_count和sessions.estimated_cost_usd，是真实数据。不要编造数字。
+```
 
 ---
 
@@ -299,8 +375,9 @@ Prompt包含：
   - 一、对话概览
   - 二、逐轮ReAct还原（每轮一页，按六角度展开）
   - 三、六角度综合分析
-  - 四、核心发现与改进方向
-  - 五、附录：工具调用时间线表格
+  - 四、成本透视（per-turn成本表、热点分析、效率指标、开销分解、优化建议）
+  - 五、核心发现与改进方向
+  - 六、附录：工具调用时间线表格
 - 排版规范：
   - 中文楷体12pt，英文Times New Roman
   - 标题黑体加粗黑色（一级16pt/二级14pt/三级12pt）
@@ -516,3 +593,49 @@ OUTPUT_DIR=./output
 | classifier缺few-shot示例 | 建议改 | prompt含2个示例+完整schema(3.3) |
 | writer跨项目依赖 | 建议改 | 排版函数拷贝到项目内，源文件注明(3.5) |
 | 无断点续跑 | 建议改 | .cache/中间结果+--no-cache强制刷新(5.3, 3.6) |
+
+---
+
+## 十一、成本透视 —— 数据来源与方法论
+
+### 11.1 为什么不需要额外埋点
+
+state.db的messages表和sessions表在Hermes写入时已经记录了完整的token统计：
+
+- `messages.token_count`：每条消息的token数（含reasoning_tokens）
+- `messages.finish_reason`：LLM调用是否正常结束（"stop"/"length"/"tool_calls"）
+- `sessions.input_tokens / output_tokens / reasoning_tokens`：整个session的汇总
+- `sessions.estimated_cost_usd`：DeepSeek API返回的成本估算
+
+晒阳不需要在Agent运行时插桩——成本数据是Hermes已经记录的副作用。reader读到什么，parser就算什么。
+
+### 11.2 成本指标的定义
+
+| 指标 | 计算方式 | 工程意义 |
+|------|----------|----------|
+| 有效token | 用户消息+Agent回答正文的token | 真正产生价值的token |
+| 开销token | 技能加载+系统提示词+工具调用的token | 为完成任务付出的固定成本 |
+| 开销占比 | 开销token/总token | 越高说明Agent越"重"——大部分token花在准备工作上 |
+| 浪费token | 失败重试+异常截断的token | 零价值的消耗，越低越好 |
+| 并行节省 | 并行轮次总token × 0.3 | 并行避免重复注入静态前缀的估算节省 |
+| 单轮成本 | DeepSeek定价 × token数 | 最直观的效率指标 |
+
+### 11.3 成本分析不能完全自动化
+
+成本数据计算是确定性的（parser层），但以下几个判断需要LLM（narrator层）：
+
+- "这次审查多花了$0.015，值不值？"——需要LLM判断审查发现的9个问题的严重程度
+- "工具调用串行化是否合理？"——需要LLM理解工具之间的依赖关系（pymupdf必须先装才能提取）
+- "浪费的2000 token是否可避免？"——需要LLM理解pymupdf venv未安装是环境问题还是设计问题
+
+所以成本透视分两层：数字由parser算（零LLM成本），解读由narrator写（计入narrator的LLM调用，不额外增加调用次数）。
+
+### 11.4 成本透视在报告中的位置
+
+位于"六角度综合分析"之后、"核心发现与改进方向"之前。逻辑顺序：
+
+```
+结构分析（六角度）→ 成本分析（每步烧了多少）→ 综合发现（结构问题+成本问题的交叉）
+```
+
+成本数据为结构分析提供量化支撑——"这个约束生效了"是定性，"生效的同时多花了$0.005"是定量。两者合在一起才能判断一个设计决策的完整ROI。
